@@ -48,6 +48,8 @@ STREAM_SDK_OBJECTS = {
     'payout_transactions': {'sdk_object': stripe.BalanceTransaction, 'key_properties': ['id']},
     'disputes': {'sdk_object': stripe.Dispute, 'key_properties': ['id']},
     'products': {'sdk_object': stripe.Product, 'key_properties': ['id']},
+    'prices': {'sdk_object': stripe.Price, 'key_properties': ['id']},
+    'payment_methods': {'sdk_object': stripe.PaymentMethod, 'key_properties': ['id']},
 }
 
 # I think this can be merged into the above structure
@@ -71,6 +73,7 @@ STREAM_REPLICATION_KEY = {
     #'invoice_line_items': 'date'
     'disputes': 'created',
     'products': 'created',
+    'prices': 'created',
 }
 
 STREAM_TO_TYPE_FILTER = {
@@ -89,6 +92,8 @@ STREAM_TO_TYPE_FILTER = {
     'invoice_line_items': {'type': 'invoice.*', 'object': ['line_item']},
     'subscription_items': {'type': 'customer.subscription.*', 'object': ['subscription_item']},
     'payout_transactions': {'type': 'payout.*', 'object': ['transfer', 'payout']},
+    'prices': {'type': 'price.*', 'object': ['price']},
+    'payment_methods': {'type': 'payment_method.*', 'object': ['payment_method']},
     # Cannot find evidence of these streams having events associated:
     # balance_transactions - seems to be immutable
 }
@@ -471,18 +476,30 @@ APIRequestor.request = new_request
 
 
 def paginate(sdk_obj, filter_key, start_date, end_date, stream_name, request_args=None, limit=100):
-    yield from sdk_obj.list(
-        limit=limit,
-        stripe_account=Context.config.get('account_id'),
-        # Some fields are not available by default with latest API version so
-        # retrieve it by passing expand paramater in SDK object
-        expand=STREAM_TO_EXPAND_FIELDS.get(stream_name, []),
-        # None passed to starting_after appears to retrieve
-        # all of them so this should always be safe.
-        **{filter_key + "[gte]": start_date,
-           filter_key + "[lt]": end_date},
-        **request_args or {}
-    ).auto_paging_iter()
+    if stream_name == 'payment_methods':
+        yield from sdk_obj.list(
+            limit=limit,
+            stripe_account=Context.config.get('account_id'),
+            # Some fields are not available by default with latest API version so
+            # retrieve it by passing expand paramater in SDK object
+            expand=STREAM_TO_EXPAND_FIELDS.get(stream_name, []),
+            # None passed to starting_after appears to retrieve
+            # all of them so this should always be safe.
+            **request_args or {}
+        ).auto_paging_iter()
+    else:
+        yield from sdk_obj.list(
+            limit=limit,
+            stripe_account=Context.config.get('account_id'),
+            # Some fields are not available by default with latest API version so
+            # retrieve it by passing expand paramater in SDK object
+            expand=STREAM_TO_EXPAND_FIELDS.get(stream_name, []),
+            # None passed to starting_after appears to retrieve
+            # all of them so this should always be safe.
+            **{filter_key + "[gte]": start_date,
+               filter_key + "[lt]": end_date},
+            **request_args or {}
+        ).auto_paging_iter()
 
 
 # pylint: disable=invalid-name
@@ -699,6 +716,10 @@ def sync_stream(stream_name, is_sub_stream=False):
                     # any fields that aren't present in the whitelist.
                     if stream_field_whitelist:
                         rec = apply_whitelist(rec, stream_field_whitelist)
+
+                    # hard-coded fix
+                    if stream_name == 'invoices' and rec['custom_fields'] is None:
+                        rec['custom_fields'] = []
 
                     singer.write_record(stream_name,
                                         rec,
@@ -1063,6 +1084,10 @@ def sync_event_updates(stream_name, is_sub_stream):
                     if rec.get('id') is not None:
                         # Write parent records only when the parent is selected
                         if not is_sub_stream:
+                            # hard-coded fix
+                            if stream_name == 'invoices' and rec['custom_fields'] is None:
+                                rec['custom_fields'] = []
+
                             singer.write_record(stream_name,
                                                 rec,
                                                 time_extracted=extraction_time)
